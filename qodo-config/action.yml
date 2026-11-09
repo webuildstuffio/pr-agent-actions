@@ -1,70 +1,160 @@
-# qodo-config v1.0.0 (2026-11-04)
+# qodo-config v2.0.0 (2026-11-08)
 #
 # Delivers the org-global Qodo pr-agent configuration (the
-# .pr_agent.toml at this repo's root) into a caller job's workspace.
+# .pr_agent.toml whose SSOT lives in webuildstuffio/pr-agent-settings)
+# into a caller job's workspace as .pr_agent.global.toml.
 #
-# Why this exists: pr-agent's own global fetch
-# (config.global_settings_repo) reads that file through the GitHub
-# API with the CALLER repo's GITHUB_TOKEN. Since pr-agent-settings
-# went private (2026-11-01), that token has no access: the contents
-# fetch 404s and pr-agent silently runs on upstream defaults,
-# logging only a DEBUG line ("No accessible organization global
-# .pr_agent.toml; using local settings only", github_provider
-# _fetch_global_repo_settings in pr-agent v0.48.0). Every global
-# tuning key not duplicated in the workflow env block (repo context
-# files, extra instructions, per-file suggestion cap,
-# publish_output_no_suggestions, the [ignore] globs, /review
-# behaviour) was dropped fleet-wide from 2026-11-01 until this fix.
+# v2 transport: package pull. The tuned toml no longer travels
+# bundled inside an action archive (v1.0.0 copied
+# ${{ github.action_path }}/../.pr_agent.toml, which forced the
+# settings repo to stay public so every caller could resolve this
+# action and read the file). Instead, pr-agent-settings publishes
+# the toml as a private GitHub Packages container image,
+# ghcr.io/webuildstuffio/pr-agent-config (semver tag + latest),
+# and this action pulls it with the CALLER job's own GITHUB_TOKEN
+# and extracts the toml. The caller repo needs a one-time
+# "Manage Actions access" grant on that package and `packages:
+# read` in the job permissions; no PAT or distributed secret is
+# involved. The actions themselves (this one and jev) live in the
+# public webuildstuffio/pr-agent-actions repo because a public
+# consumer repo can never resolve an action from a private repo.
 #
-# Transport is the same one the Jev action uses: wired repos load
-# this action with `uses:` at a full 40-char commit SHA, served to
-# the job's own GITHUB_TOKEN under this repo's organization Actions
-# access level. The action copies the bundled toml to
-# .pr_agent.global.toml in the caller workspace, and the wiring
-# points pr-agent at it via config.extra_config_url
-# ("/github/workspace/.pr_agent.global.toml", the workspace mount
-# path inside the pr-agent Docker container).
+# Why this indirection exists at all: pr-agent's own global fetch
+# (config.global_settings_repo) reads the settings repo through
+# the GitHub API with the CALLER repo's GITHUB_TOKEN. While
+# pr-agent-settings is private, that token has no access: the
+# contents fetch 404s and pr-agent silently runs on upstream
+# defaults, logging only a DEBUG line ("No accessible organization
+# global .pr_agent.toml; using local settings only", github_provider
+# _fetch_global_repo_settings in pr-agent v0.48.0). The wiring
+# points pr-agent at the extracted file via
+# config.extra_config_url ("/github/workspace/.pr_agent.global
+# .toml"), and that contract is unchanged from v1.
 #
 # Precedence inside pr-agent v0.48.0 (apply_repo_settings ->
 # apply_host_settings, then repo settings, then env re-applied
 # last): built-in defaults < extra config (this file) < per-repo
 # .pr_agent.toml < workflow env. So this restores the global layer
 # without weakening per-repo overrides or the env block.
+#
+# The default tag is `latest`: publishing is the config change
+# taking effect, the same live semantics the pre-v3.7
+# global_settings_repo fetch had (it read the settings repo's
+# default branch). Set the version input to a semver tag to pin
+# or roll back a specific published config.
 name: Qodo global config
 description: >-
-  Copies the org-global .pr_agent.toml bundled in pr-agent-settings
-  into the caller workspace as .pr_agent.global.toml, for pr-agent
-  to load via config.extra_config_url.
+  Pulls the org-global .pr_agent.toml from the private
+  pr-agent-config package (published by pr-agent-settings) into
+  the caller workspace as .pr_agent.global.toml, for pr-agent to
+  load via config.extra_config_url.
+inputs:
+  version:
+    description: >-
+      pr-agent-config package tag to pull: a semver tag
+      (e.g. 1.0.0) or latest.
+    required: false
+    default: "latest"
 runs:
   using: composite
   steps:
-    - name: Copy global .pr_agent.toml into workspace
+    - name: Pull global .pr_agent.toml from pr-agent-config package
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_ACTOR: ${{ github.actor }}
+        CONFIG_VERSION: ${{ inputs.version }}
       run: |
-        src="${{ github.action_path }}/../.pr_agent.toml"
+        set -euo pipefail
+        pkg="webuildstuffio/pr-agent-config"
         dest="${{ github.workspace }}/.pr_agent.global.toml"
-        if [ ! -f "$src" ]; then
-          echo "::error::Bundled .pr_agent.toml not found at $src"
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        json_get() {
+          # json_get <file> <jq-filter> <python-expression>
+          if command -v jq >/dev/null 2>&1; then
+            jq -r "$2" "$1"
+          else
+            python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print($3)" "$1"
+          fi
+        }
+        # Registry token exchange: the job GITHUB_TOKEN (with the
+        # package's Actions access grant for this repo) becomes a
+        # short-lived GHCR pull token for exactly this package.
+        if ! curl -fsSL -u "$GH_ACTOR:$GH_TOKEN" \
+          "https://ghcr.io/token?service=ghcr.io&scope=repository:$pkg:pull" \
+          -o "$tmp/token.json"; then
+          echo "::error::GHCR token exchange failed for $pkg"
+          exit 1
+        fi
+        reg_token="$(json_get "$tmp/token.json" '.token // empty' 'd.get("token","")')"
+        if [ -z "$reg_token" ]; then
+          echo "::error::GHCR token exchange returned no token for $pkg"
+          exit 1
+        fi
+        accept="Accept: application/vnd.oci.image.index.v1+json"
+        accept="$accept, application/vnd.docker.distribution.manifest.list.v2+json"
+        accept="$accept, application/vnd.oci.image.manifest.v1+json"
+        accept="$accept, application/vnd.docker.distribution.manifest.v2+json"
+        if ! curl -fsSL -H "Authorization: Bearer $reg_token" -H "$accept" \
+          "https://ghcr.io/v2/$pkg/manifests/$CONFIG_VERSION" \
+          -o "$tmp/manifest.json"; then
+          echo "::error::Could not fetch manifest for $pkg:$CONFIG_VERSION"
+          echo "::error::A 403/404 here usually means this repo has no Actions access grant on the package."
+          exit 1
+        fi
+        # A tag can resolve to an index (multi-arch); descend once.
+        is_index="$(json_get "$tmp/manifest.json" 'has("manifests")' 'str("manifests" in d).lower()')"
+        if [ "$is_index" = "true" ]; then
+          first_digest="$(json_get "$tmp/manifest.json" '.manifests[0].digest // empty' '(d.get("manifests") or [{}])[0].get("digest","")')"
+          if ! curl -fsSL -H "Authorization: Bearer $reg_token" -H "$accept" \
+            "https://ghcr.io/v2/$pkg/manifests/$first_digest" \
+            -o "$tmp/manifest.json"; then
+            echo "::error::Could not fetch platform manifest $first_digest for $pkg"
+            exit 1
+          fi
+        fi
+        layer_digest="$(json_get "$tmp/manifest.json" '.layers[0].digest // empty' '(d.get("layers") or [{}])[0].get("digest","")')"
+        if [ -z "$layer_digest" ]; then
+          echo "::error::No layer found in manifest for $pkg:$CONFIG_VERSION"
+          exit 1
+        fi
+        if ! curl -fsSL -H "Authorization: Bearer $reg_token" \
+          "https://ghcr.io/v2/$pkg/blobs/$layer_digest" \
+          -o "$tmp/layer.tar"; then
+          echo "::error::Could not download layer $layer_digest for $pkg"
+          exit 1
+        fi
+        mkdir -p "$tmp/extract"
+        tar -xf "$tmp/layer.tar" -C "$tmp/extract"
+        src=""
+        if [ -f "$tmp/extract/.pr_agent.toml" ]; then
+          src="$tmp/extract/.pr_agent.toml"
+        else
+          src="$(find "$tmp/extract" -name '.pr_agent.toml' -print -quit)"
+        fi
+        if [ -z "$src" ] || [ ! -f "$src" ]; then
+          echo "::error::.pr_agent.toml not found in package $pkg:$CONFIG_VERSION"
           exit 1
         fi
         cp "$src" "$dest"
-        echo "Global Qodo config: copied $src -> $dest ($(wc -c < "$dest") bytes)"
-    - name: Validate copied TOML syntax
+        echo "Global Qodo config: pulled $pkg:$CONFIG_VERSION -> $dest ($(wc -c < "$dest") bytes)"
+    - name: Validate pulled TOML syntax
       shell: bash
       run: |
         # Fail the step (and with it the caller's failure-check)
-        # on a corrupt bundled toml, instead of letting pr-agent
+        # on a corrupt pulled toml, instead of letting pr-agent
         # warn-and-skip it downstream. tomllib is Python 3.11+;
         # where the runner's python3 lacks it (or python3 itself
         # is absent), validation is skipped with a warning rather
         # than failing the step: a missing validator must not take
-        # down a config copy that already succeeded.
+        # down a config pull that already succeeded.
         dest="${{ github.workspace }}/.pr_agent.global.toml"
         if python3 -c "import tomllib" 2>/dev/null; then
           if python3 -c "import tomllib, sys; tomllib.load(open(sys.argv[1], 'rb'))" "$dest"; then
             echo "Global Qodo config: $dest parses as valid TOML"
           else
-            echo "::error::Bundled .pr_agent.toml is not valid TOML"
+            echo "::error::Pulled .pr_agent.toml is not valid TOML"
             exit 1
           fi
         else
