@@ -13,18 +13,36 @@ from jev_lib import ESCALATION_COMMENT, GENERIC_LABELS, VERSION
 BAND_DOTS = {"high": "🔴", "mid": "🟡", "low": "🟢"}
 
 
+TIER_DOTS = {"Ship confidently": "🟢",
+             "Ship after standard review": "🟢",
+             "Deep review required": "🔴",
+             "Owner must look": "🔴"}
+
+
 def marker_body(state, d, adds_pr, adds_issue, codex_now,
-                issue_number=None, skipped=None, escalated=False):
-    """The sticky status comment: compact and scannable (a reviewer
-    should read it in ~5 seconds). The machine state stays hidden in
-    the HTML-comment marker; nothing raw is rendered."""
+                issue_number=None, skipped=None, escalated=False,
+                codex_identity=None, codex_state=None):
+    """The sticky status comment (v2.3.0 redesign): verdict line
+    first (ship tier + review level), then labels, security with
+    the Codex DELIVERY state, risk, and conditional lines only
+    when they fire. The machine state stays hidden in the
+    HTML-comment marker; nothing raw is rendered."""
     band = d.get("security_band") or "unknown"
-    lines = [f"{BAND_DOTS.get(band, '⚪')} **Jev tagging (pilot)**"]
+    lines = []
+    if d.get("abstained"):
+        lines.append("⚪ **Jev: no verdict · model unavailable**")
+    elif d.get("ship_tier"):
+        lvl = d.get("review_level_name") or ""
+        lines.append(
+            f"{TIER_DOTS.get(d['ship_tier'], '⚪')} **Jev: "
+            f"{d['ship_tier']} · Review level {lvl}**")
+    else:
+        lines.append(f"{BAND_DOTS.get(band, '⚪')} **Jev tagging**")
     if adds_pr:
-        lines.append("**PR labels:** "
+        lines.append("**Labels:** "
                      + ", ".join(f"`{x}`" for x in adds_pr))
     else:
-        lines.append("**PR labels:** no changes")
+        lines.append("**Labels:** no changes")
     if issue_number:
         if adds_issue:
             lines.append(f"**Issue #{issue_number} labels:** "
@@ -47,18 +65,66 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now,
         hits = ", ".join(_code_span(h["match"])
                          for h in l1["hits"][:2])
         sec += f" · rule hits: {hits}"
-    if codex_now:
-        sec += " · Codex review **requested**"
-    elif d.get("codex_posted_before"):
-        sec += " · Codex review already requested"
-    elif d.get("codex_post"):
-        sec += " · Codex review due (already present)"
+    if not codex_now and not d.get("codex_posted_before") \
+            and not d.get("codex_post") \
+            and not d.get("wave_sibling"):
+        sec += " · no security review needed"
     lines.append(sec)
+    # Codex DELIVERY state (v2.3.0): "requested" was a lie on
+    # non-PAT repos, where a bot-authored standalone comment
+    # triggers nothing (0 of 40 delivered in the v3 recheck).
+    # Say who posted it and what that means.
+    if codex_now or d.get("codex_posted_before") or escalated:
+        if codex_state:
+            safe = str(codex_state).replace("`", "'") \
+                .replace("\n", " ")[:40]
+            delivery = f"state: **{safe}**"
+        elif codex_identity and codex_identity != "github-actions[bot]":
+            delivery = "state: posted, awaiting Codex"
+        elif codex_identity == "github-actions[bot]" or codex_now:
+            delivery = ("state: **not delivered (bot mentions do "
+                        "not trigger Codex; PAT does not reach "
+                        "this repo)** · escalation is record-only "
+                        "here")
+        else:
+            delivery = "state: posted earlier"
+        who = (f"posted as {_code_span(str(codex_identity))}"
+               if codex_identity else "posted earlier")
+        lines.append(f"🛡️ Codex security review: standalone "
+                     f"comment {who} · {delivery}")
+    if d.get("wave_sibling"):
+        sib = d["wave_sibling"]
+        lines.append(
+            "🌊 Wave sibling of "
+            + _code_span(f"{sib.get('repo')}#{sib.get('number')}")
+            + ": escalation posted there, not repeated here")
     if d.get("abstained"):
         lines.append("⚠️ **Model unavailable:** Jev did not answer "
                      "after retries, so this run abstained. Labels "
                      "are incomplete: only deterministic Layer 1 "
                      "stamps were applied, if any.")
+    # Risk line: printed whenever the new answers exist.
+    if d.get("breakage_risk") is not None \
+            or d.get("p_changes_behavior") is not None:
+        risk = f"⚠️ Risk to ship: breakage {d.get('breakage_risk')}/4"
+        cb = d.get("p_changes_behavior")
+        risk += (" · behavior-changing: "
+                 + ("yes" if cb is not None and cb >= 0.50
+                    else "no" if cb is not None else "—"))
+        pp = d.get("p_perf_risk")
+        risk += (" · perf risk: "
+                 + ("yes" if d.get("perf_flag") else "no"
+                    if pp is not None else "—"))
+        lines.append(risk)
+    if d.get("test_gap_flag"):
+        gap = d.get("test_gap") or {}
+        if gap.get("status") == "hard":
+            lines.append("🧪 Tests: no test files touched on a "
+                         "behavior change")
+        else:
+            tp = d.get("p_tests_cover_change")
+            lines.append(f"🧪 Tests: test changes may not exercise "
+                         f"the changed behavior (P {tp:.2f})")
     if escalated:
         # Body rebuilt from scratch per render: exactly one section.
         lines.extend(escalation_section(d))
@@ -95,7 +161,9 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now,
             shown.append(f"+{len(notes) - 4} more")
         lines.append("<sub>Skipped/notes: " + "; ".join(shown)
                      + "</sub>")
-    lines.append(f"<sub>jev-tag v{VERSION}</sub>")
+    lines.append(f"<sub>jev-tag v{VERSION} · one Jev pass at "
+                 "open; CI and reviewer findings are not in "
+                 "this verdict</sub>")
     payload = json.dumps(state, separators=(",", ":"), sort_keys=True)
     return f"<!-- jev-tag:v1 {payload} -->\n" + "\n".join(lines)
 

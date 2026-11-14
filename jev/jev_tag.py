@@ -31,21 +31,28 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 
-from jev_lib import (SECURITY_QUESTION_KEYS, TIERS, JevError,
+from jev_lib import (REVIEW_LEVEL_NAMES, SECURITY_QUESTION_KEYS,
+                     TIERS, JevError,
                      build_questions, build_security_state, build_state,
-                     call_jev, decide, layer1, plan_labels,
-                     security_questions)
+                     call_jev, decide, layer1,
+                     plan_labels, security_questions,
+                     wave_dedupe_applies)
 from jev_present import escalation_comment, marker_body
+from jev_marker import MARKER_RE as MARKER_RE
+from jev_marker import codex_security_state as codex_security_state
+from jev_marker import find_marker as find_marker
+from jev_gh import GH_API as GH_API
+from jev_gh import Gh as Gh
+from jev_gh import GhError as GhError
+from jev_wave import find_wave_leader as find_wave_leader
+from jev_wave import standalone_delivered as standalone_delivered
+from jev_wave import trigger_author as trigger_author
 from jev_present import match_user_facing_label
 # Re-exports for the tests, which import these from jev_tag.
 from jev_present import codex_focus as codex_focus
 from jev_present import escalation_section as escalation_section
 
-GH_API = "https://api.github.com"
-MARKER_RE = re.compile(r"<!-- jev-tag:v1 (\{.*?\}) -->", re.DOTALL)
 
 
 def warn(msg):
@@ -54,57 +61,6 @@ def warn(msg):
 
 
 # ---------------------------------------------------------------- GitHub
-
-class GhError(Exception):
-    pass
-
-
-class Gh:
-    def __init__(self, token):
-        self.token = token
-
-    def call(self, method, path, body=None, ok_missing=False):
-        url = path if path.startswith("http") else GH_API + path
-        data = None
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "jev-tag/1.0",
-        }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers,
-                                     method=method)
-        try:
-            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- req targets the hardcoded https GH_API constant; only the API path suffix varies
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                text = resp.read().decode("utf-8", "ignore")
-                return json.loads(text) if text else {}
-        except urllib.error.HTTPError as exc:
-            if ok_missing and exc.code == 404:
-                return None
-            raise GhError(f"{method} {path} -> HTTP {exc.code}")
-        except Exception as exc:  # network, timeout, JSON
-            raise GhError(f"{method} {path} -> {exc}")
-
-    def get_all(self, path, limit_pages=30):
-        """GET a list endpoint, following ?page= pagination. The cap
-        matches the GitHub API's own ceilings (e.g. 3,000 files per
-        PR); callers that care check for a full-cap result."""
-        out = []
-        sep = "&" if "?" in path else "?"
-        for page in range(1, limit_pages + 1):
-            chunk = self.call("GET", f"{path}{sep}per_page=100&page={page}")
-            if not isinstance(chunk, list):
-                break
-            out.extend(chunk)
-            if len(chunk) < 100:
-                break
-        return out
-
 
 def parse_linked_issue(body):
     """First Closes/Fixes/Resolves #N, else first Refs #N, else None."""
@@ -130,6 +86,7 @@ def fetch_bundle(gh, repo, pr_number, workdir):
         # be incomplete, which the decision record must say out loud.
         "files_truncated": len(files) >= 3000,
         "pr_title": pr.get("title") or "",
+        "pr_created_at": pr.get("created_at") or "",
         "pr_body": pr.get("body") or "",
         "pr_author": (pr.get("user") or {}).get("login") or "",
         "pr_labels": [lab["name"] for lab in pr.get("labels") or []],
@@ -187,29 +144,6 @@ def fetch_bundle(gh, repo, pr_number, workdir):
     except GhError as exc:
         warn(f"label list fetch failed (fail-open): {exc}")
     return bundle
-
-
-def find_marker(comments, extra_authors=()):
-    """(comment, state dict) of the newest jev-tag marker comment.
-
-    Trusted authors: github-actions[bot] plus any `extra_authors`
-    (the JEV_MENTION_PAT owner's login, resolved from the token
-    itself; that human is the label-floor authority). Anyone else
-    could forge state to suppress the Codex trigger or veto."""
-    trusted = {"github-actions[bot]"} | set(extra_authors)
-    for c in reversed(comments):
-        if (c.get("user") or {}).get("login") not in trusted:
-            continue
-        m = MARKER_RE.search(c.get("body") or "")
-        if m:
-            try:
-                return c, json.loads(m.group(1))
-            except ValueError:
-                continue
-    return None, {"pr_applied": [], "issue_applied": [],
-                  "issue_number": None, "codex_posted": False,
-                  "codex_standalone_posted": False,
-                  "runs": 0}
 
 
 def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
@@ -380,6 +314,12 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
     state.setdefault("escalation_noted", False)
     if (d.get("escalation") or {}).get("would_fire"):
         state["escalation_noted"] = True
+    # v2.3.0 additive marker fields: old markers parse unchanged,
+    # and the human-veto sets above are untouched by them.
+    state["ship_tier"] = d.get("ship_tier")
+    state["review_level"] = d.get("review_level")
+    if d.get("wave_sibling"):
+        state["wave_sibling"] = d["wave_sibling"]
     state["runs"] = int(state.get("runs") or 0) + 1
     skipped = (
         [f"`{x}` removed by a human earlier, not re-added"
@@ -390,16 +330,25 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
            for x in out["missing_pr"]]
         + [f"`{x}` (issue) is not a label in this repo"
            for x in out["missing_issue"]])
-    body = marker_body(state, d, applied_pr, applied_issue, codex_claim,
-                       issue_number=(issue or {}).get("number"),
-                       skipped=skipped,
-                       escalated=bool(state["codex_posted"]))
+    body = marker_body(
+        state, d, applied_pr, applied_issue, codex_claim,
+        issue_number=(issue or {}).get("number"),
+        skipped=skipped,
+        escalated=bool(state["codex_posted"]),
+        codex_identity=(
+            (mention_login if mention_gh is not None
+             else "github-actions[bot]") if codex_claim
+            else (trigger_author(comments)
+                  or (mention_login if mention_gh is not None
+                      else "github-actions[bot]"))),
+        codex_state=codex_security_state(comments))
     # A first marker also posts when nothing was applied but the run
     # has something a reviewer must see (perf/readiness/impact flags,
     # skipped labels, a would-fire escalation); otherwise those
     # warnings would stay invisible until some later label change.
     show_worthy = bool(
         applied_pr or applied_issue or codex_now
+        or d.get("wave_sibling") or d.get("test_gap_flag")
         or d.get("abstained")
         or out["missing_pr"] or out["missing_issue"]
         or d.get("perf_flag") or d.get("issue_ready_low")
@@ -551,6 +500,30 @@ def run(repo, pr_number, mode, workdir):
             record["comments_error"] = str(exc)
             warn(f"comments fetch failed: {exc}")
     d = decide(bundle, l1, jev, prior=prior)
+    # v2.3.0 wave dedupe (G8): suppress the standalone post when
+    # an earlier same-title, same-file-set PR in another repo
+    # already posted within ~24h. Labels and the stamp are
+    # untouched; critical hits always post. Fail-open on any
+    # search failure: no leader, post as before.
+    record["wave_dedupe"] = "not-applicable"
+    if wave_dedupe_applies(d, l1):
+        try:
+            leader = find_wave_leader(mention_gh or gh, bundle,
+                                      mention_login)
+        except GhError as exc:
+            leader = None
+            record["wave_dedupe"] = f"search-failed: {exc}"
+            warn(f"wave dedupe search failed (fail-open): {exc}")
+        if leader:
+            d["wave_sibling"] = leader
+            d["codex_post_raw"] = True
+            d["codex_post"] = False
+            if (d.get("review_level") or 0) < 2:
+                d["review_level"] = 2
+                d["review_level_name"] = REVIEW_LEVEL_NAMES[2]
+            record["wave_dedupe"] = f"suppressed: sibling {leader}"
+        elif record["wave_dedupe"] == "not-applicable":
+            record["wave_dedupe"] = "no-leader"
     if (d.get("escalation") or {}).get("would_fire"):
         d["escalation"]["comment"] = escalation_comment(d)
     record["decision"] = d

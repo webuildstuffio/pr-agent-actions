@@ -5,7 +5,7 @@ and the dedicated security call's subset. Split out of jev_lib.py
 in v2.2.0 (file-length limit); jev_lib re-exports everything
 here. Python 3 standard library only."""
 
-from jev_layer1 import repo_specialties
+from jev_layer1 import repo_specialties, test_gap
 
 
 QUESTIONS = {
@@ -120,6 +120,21 @@ QUESTIONS = {
         "type": "noul",
         "instructions": "This change is low risk to merge: it cannot break production behavior (docs, copy, tests, or trivially safe edits only).",
     },
+    "breakage_risk": {
+        "type": "score",
+        "instructions": "How likely is this change to break existing behavior in production within a week of merging? Judge from the files touched, the kind of change, and the linked issue.",
+        "criteria": [
+            "0 - No behavior change: docs, tests, comments, formatting or chore only",
+            "1 - Isolated behavior change in one place, easily reverted",
+            "2 - Behavior change in shared or user-facing code paths",
+            "3 - Touches data or migrations, concurrency, payments, auth-adjacent or cross-service behavior, or is hard for a reviewer to hold in their head",
+            "4 - Several of those at once, or a change whose failure would be silent (no error surfaces when it goes wrong)",
+        ],
+    },
+    "changes_behavior": {
+        "type": "noul",
+        "instructions": "Does this pull request change runtime behavior at all, as opposed to only docs, tests, comments, formatting or configuration with no behavioral effect?",
+    },
     "perf_risk": {
         "type": "noul",
         "instructions": "This change could degrade speed or responsiveness: slower or heavier queries or data access, larger bundle or payload, hot-path or render-path work, missing pagination or caching, or more computation per request.",
@@ -142,6 +157,15 @@ def build_questions(bundle):
     the live label list has specialties) a dynamic choice question
     whose criteria ARE those labels plus a none option."""
     questions = dict(QUESTIONS)
+    # Test-coverage noul (v2.3.0): asked only in the middle case,
+    # when both source and test files moved; the hard gap (source
+    # moved, no tests) is a Layer 1 fact, not a question.
+    gap = test_gap(bundle)
+    if gap["behavior_files"] > 0 and gap["test_files"] > 0:
+        questions["tests_cover_change"] = {
+            "type": "noul",
+            "instructions": "Do the test changes in this pull request plausibly exercise the behavior this pull request changes, judging from the test file names, the changed source files, and the pull request description?",
+        }
     if bundle.get("issue"):
         questions["issue_ready"] = {
             "type": "noul",

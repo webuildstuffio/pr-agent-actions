@@ -105,7 +105,7 @@ because a workflow cannot download its own repo's action archive
 packaging carries its own version note (the header comment in
 `jev/action.yml`, currently jev-action v1.0.0; packaging changes bump
 it, decision-logic changes do not). The step carries a
-version (`VERSION` in `jev_lib.py`, currently v2.2.0; the v1 to v2
+version (`VERSION` in `jev_lib.py`, currently v2.3.0; the v1 to v2
 jump marks the warrant gate plus the paths-only Layer 1, whose
 decisions are not comparable to v1 runs; v2.0.1 tokenizes dotted
 compound stems such as auth.service.ts; v2.1.0 folds the Codex
@@ -113,8 +113,17 @@ mention into the sticky comment and adds the JEV_MENTION_PAT
 owner-identity sticky path; v2.2.0 is the top-5 improvement
 package: retry + abstain, the docs-only gate, Layer 1 refinement,
 the standalone Codex comment, and the dedicated security call
-with escalation concurrence). Wirings stamp the version
-as a `# jev-tag v2.2.0` comment above the step and the sticky comment
+with escalation concurrence; v2.3.0 adds wave dedupe for
+escalation posting (same normalized title + identical file-path
+set across repos within about 24 hours posts on the first
+instance only, critical hits always post), the Risk to ship
+composite (breakage_risk score plus changes_behavior noul
+feeding a deterministic ship tier and review levels L0-L4 in
+decide(); record-only, printed in the sticky, never a merge
+gate), the test-gap Layer 1 rule plus tests_cover_change noul
+(sticky line only), and the sticky verdict-first redesign with
+the Codex delivery state printed honestly). Wirings stamp the version
+as a `# jev-tag v2.3.0` comment above the step and the sticky comment
 footer shows it. Mode is controlled per repo by the `JEV_TAG_MODE`
 repository variable (`dry-run` or `apply`; default `apply` when
 unset). Python 3 standard library only.

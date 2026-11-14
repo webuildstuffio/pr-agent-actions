@@ -156,6 +156,68 @@ def docs_only(bundle):
     return bool(files) and all(is_doc_path(f["path"]) for f in files)
 
 
+# ------------------------------------------------------- Test gap (v2.3.0)
+
+CODE_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py",
+             ".rs", ".go", ".rb", ".php", ".java", ".c", ".h",
+             ".cpp", ".hpp", ".cs", ".swift", ".kt", ".kts", ".sh",
+             ".bash", ".vue", ".svelte"}
+CONFIG_EXTS = {".json", ".jsonc", ".toml", ".yaml", ".yml", ".ini",
+               ".cfg", ".conf", ".properties", ".xml", ".csv"}
+LOCK_BASENAMES = {"bun.lock", "bun.lockb", "cargo.lock", "go.sum",
+                  "gemfile.lock", "composer.lock", "yarn.lock",
+                  "pnpm-lock.yaml", "package-lock.json", "uv.lock",
+                  "poetry.lock"}
+
+
+def file_kind(path):
+    """One coarse kind per changed file, for the test-gap rule.
+    The allowlist classes (generated, lockfile, migration, config,
+    docs, tests) never count as behavior files, so a PR touching
+    only those can never earn a hard test gap."""
+    comps = [c for c in path.lower().split("/") if c]
+    if not comps:
+        return "other"
+    base = comps[-1]
+    ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
+    if is_test_path(comps):
+        return "test"
+    if is_doc_path(path):
+        return "doc"
+    if ("generated" in comps or ".gen." in base
+            or ".generated." in base or base.startswith("gen_")):
+        return "generated"
+    if base in LOCK_BASENAMES:
+        return "lock"
+    if any(c in ("migration", "migrations") for c in comps[:-1]) \
+            or ext == ".sql":
+        return "migration"
+    if ext in CONFIG_EXTS or base in INFRA_BASENAMES \
+            or base == ".env" or base.startswith(".env."):
+        return "config"
+    if ext in CODE_EXTS:
+        return "behavior"
+    return "other"
+
+
+def test_gap(bundle):
+    """Deterministic test-gap signal (v2.3.0, catalogue Pick 3).
+
+    hard: at least one behavior (source code) file changed and
+    zero test files changed. Comment-only signal: never a label,
+    never a gate. Returns counts so the sticky and the record can
+    say exactly what was seen."""
+    files = bundle.get("files") or []
+    kinds = [file_kind(f["path"]) for f in files]
+    behavior = kinds.count("behavior")
+    tests = kinds.count("test")
+    return {
+        "status": "hard" if behavior > 0 and tests == 0 else None,
+        "behavior_files": behavior,
+        "test_files": tests,
+    }
+
+
 def _path_categories(path):
     """(categories, critical, security_categories) for one changed
     path, by directory semantics: whole directory components and
