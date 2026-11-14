@@ -4,25 +4,36 @@ Layer 1 rules, the Jev job sheet + Decisions API call, and the
 label decision logic. Fetched alongside jev_tag.py at the same
 pinned SHA. Python 3 standard library only."""
 
-import json
-import os
-import time
-import urllib.error
-import urllib.request
-
 
 # Re-exports (v2.2.0 module split): jev_tag.py and the tests
 # import these names from jev_lib, as they did before the split.
 from jev_layer1 import (DEP_MANIFESTS, SCHEMA_EFFORTS,
                         SCHEMA_PRIORITIES, SCHEMA_THEMES,
                         SCHEMA_TYPES, SEC_CATEGORIES, docs_only,
-                        repo_specialties)
+                        repo_specialties, test_gap)
 from jev_layer1 import TIERS as TIERS
 from jev_layer1 import layer1 as layer1
-from jev_sheet import QUESTIONS
+from jev_sheet import QUESTIONS as QUESTIONS
 from jev_sheet import SECURITY_QUESTION_KEYS as SECURITY_QUESTION_KEYS
 from jev_sheet import build_questions as build_questions
 from jev_sheet import security_questions as security_questions
+from jev_call import JEV_MODEL as JEV_MODEL
+from jev_call import JEV_URL as JEV_URL
+from jev_call import JevError as JevError
+from jev_call import call_jev as call_jev
+from jev_ship import L3_BUDGET_FLEET_DAY as L3_BUDGET_FLEET_DAY
+from jev_ship import L3_BUDGET_REPO_DAY as L3_BUDGET_REPO_DAY
+from jev_ship import REVIEW_LEVEL_NAMES as REVIEW_LEVEL_NAMES
+from jev_ship import SHIP_CONFIDENTLY as SHIP_CONFIDENTLY
+from jev_ship import SHIP_DEEP as SHIP_DEEP
+from jev_ship import SHIP_OWNER as SHIP_OWNER
+from jev_ship import SHIP_STANDARD as SHIP_STANDARD
+from jev_ship import l3_budget_ok as l3_budget_ok
+from jev_ship import normalize_title as normalize_title
+from jev_ship import pick_wave_leader as pick_wave_leader
+from jev_ship import ship_tier_and_level as ship_tier_and_level
+from jev_ship import wave_dedupe_applies as wave_dedupe_applies
+from jev_ship import wave_key as wave_key
 
 OWNER_LABEL_MIN = 0.90        # noul needed for owner-decision / -mustdo
 THEME_MIN = 0.30              # min choice probability per applied theme
@@ -63,7 +74,19 @@ STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 # targeted patch snippets, and the Codex post requires model
 # concurrence at P >= 0.40 (the security LABEL keeps its old
 # rule; concurrence there was simulated net-negative).
-VERSION = "2.2.0"
+# v2.3.0 = the recheck-v3 package (2026-11-14): (1) wave dedupe
+# (G8): an escalation whose normalized title + file-path set
+# matches an earlier PR in another repo within 24h that already
+# posted is suppressed and noted as a wave sibling (critical
+# hits always post); (2) Risk to ship: breakage_risk score +
+# changes_behavior noul feed a deterministic ship tier in
+# decide() (record-only: printed in the sticky, never a gate,
+# never auto-merge); (3) review levels L0-L4 derived in code,
+# with the @claude L3 gate input upgraded from the codex_worth
+# proxy to breakage_risk; (4) test-gap Layer 1 rule plus the
+# tests_cover_change noul (sticky line only); (5) sticky
+# redesign: verdict line first, Codex DELIVERY state printed.
+VERSION = "2.3.0"
 
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.
@@ -93,10 +116,6 @@ ESCALATION_MIN_LINES = 400    # gate: large diff by changed lines...
 ESCALATION_MIN_FILES = 15     # ...or by file count
 
 
-JEV_URL = "https://openrouter.ai/api/alpha/decisions"
-JEV_MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.14")
-
-
 def trunc_bytes(text, limit):
     """Truncate a string to at most `limit` UTF-8 bytes, safely."""
     if text is None:
@@ -116,10 +135,6 @@ USER_IMPACT_MIN = 0.50        # min choice probability to act on impact
 # The user-facing matcher and the comment-text builders live in
 # jev_tag.py (presentation); decide() consumes the caller's
 # precomputed bundle["user_facing_label"] instead.
-
-
-class JevError(Exception):
-    pass
 
 
 def build_state(bundle, l1):
@@ -172,65 +187,6 @@ def build_state(bundle, l1):
             section = head + "\n".join(sorted(catalog))
         parts.append(trunc_bytes(section, 5000))
     return trunc_bytes("\n\n".join(parts), STATE_BUDGET)
-
-
-
-
-JEV_ATTEMPTS = 3              # total attempts per call (v2.2.0 retry)
-JEV_TIMEOUT = 20              # seconds per attempt (was: one 90s try)
-JEV_BACKOFF = 2.0             # base seconds; doubles per retry
-
-
-def _call_jev_once(state, api_key, questions, timeout):
-    """A single Decisions API attempt. Raises JevError on any
-    HTTP, network, or malformed-response failure."""
-    payload = {"model": JEV_MODEL, "state": state,
-               "questions": questions or QUESTIONS}
-    req = urllib.request.Request(
-        JEV_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "jev-tag/1.0",
-        },
-        method="POST")
-    try:
-        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- req targets the hardcoded https JEV_URL constant; only the JSON payload varies
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "ignore"))
-    except urllib.error.HTTPError as exc:
-        raise JevError(f"Jev HTTP {exc.code}")
-    except Exception as exc:
-        raise JevError(f"Jev call failed: {exc}")
-    if not isinstance(data.get("answers"), dict):
-        raise JevError("Jev response has no answers object")
-    return data
-
-
-def call_jev(state, api_key, questions=None, attempts=JEV_ATTEMPTS,
-             timeout=JEV_TIMEOUT, _sleep=None, _once=None):
-    """One Decisions API request, retried with backoff (v2.2.0).
-
-    The pre-2.2.0 single 90s attempt degraded 12.3% of runs in the
-    audit window and every degraded run applied a wrong fallback
-    set. Retries are bounded (3 attempts at ~20s), so the worst
-    case inside the Qodo job is about a minute, not 4.5 minutes of
-    naive 90s retries. Raises JevError after the last attempt; the
-    caller then ABSTAINS (see decide())."""
-    if not api_key:
-        raise JevError("OPENROUTER_API_KEY is not set")
-    sleep = _sleep if _sleep is not None else time.sleep
-    once = _once if _once is not None else _call_jev_once
-    last = None
-    for i in range(max(1, attempts)):
-        try:
-            return once(state, api_key, questions, timeout)
-        except JevError as exc:
-            last = exc
-            if i + 1 < max(1, attempts):
-                sleep(JEV_BACKOFF * (2 ** i))
-    raise last
 
 
 
@@ -512,6 +468,35 @@ def decide(bundle, l1, jev, prior=None):
     lr = answers.get("low_risk") or {}
     d["p_low_risk"] = lr.get("noul") if isinstance(lr, dict) else None
 
+    # --- Risk to ship inputs (v2.3.0): breakage_risk is a raw
+    # score 0-4 (NOT blast-style +1); changes_behavior is a noul.
+    br = answers.get("breakage_risk") or {}
+    br_score = br.get("score") if isinstance(br, dict) else None
+    if isinstance(br_score, str):
+        try:
+            br_score = float(br_score)
+        except ValueError:
+            br_score = None
+    d["breakage_risk"] = (int(round(float(br_score)))
+                          if isinstance(br_score, (int, float))
+                          and 0 <= float(br_score) <= 4 else None)
+    cb = answers.get("changes_behavior") or {}
+    cb_p = cb.get("noul") if isinstance(cb, dict) else None
+    d["p_changes_behavior"] = (float(cb_p)
+                               if isinstance(cb_p, (int, float))
+                               else None)
+    # --- test gap (v2.3.0): Layer 1 fact + the middle-case noul.
+    d["test_gap"] = test_gap(bundle)
+    tc = answers.get("tests_cover_change") or {}
+    tc_p = tc.get("noul") if isinstance(tc, dict) else None
+    d["p_tests_cover_change"] = (float(tc_p)
+                                 if isinstance(tc_p, (int, float))
+                                 else None)
+    d["test_gap_flag"] = bool(
+        d["test_gap"]["status"] == "hard"
+        or (d["p_tests_cover_change"] is not None
+            and d["p_tests_cover_change"] < 0.40))
+
     # --- specialty labels: picks come only from the repo's live
     # list (the dynamic question's criteria); outside picks, or any
     # pick when the list was never fetched, are dropped here, and
@@ -579,11 +564,20 @@ def decide(bundle, l1, jev, prior=None):
     diff_lines = sum((f.get("additions") or 0) + (f.get("deletions") or 0)
                      for f in files)
     cw_score = d["codex_worth_score"]
-    risk_level = (int(round(float(cw_score)))
-                  if isinstance(cw_score, (int, float)) else None)
-    esc_risk_ok = bool(
-        risk_level is not None
-        and (risk_level >= 4 or (risk_level == 3 and blast == 5)))
+    # v2.3.0: the gate's risk input is breakage_risk when the
+    # model answered it; the codex_worth proxy remains only as
+    # the fallback for answer sets that predate the question.
+    if d["breakage_risk"] is not None:
+        risk_level = d["breakage_risk"]
+        esc_risk_ok = bool(
+            risk_level >= 3
+            or (risk_level == 2 and blast is not None and blast >= 4))
+    else:
+        risk_level = (int(round(float(cw_score)))
+                      if isinstance(cw_score, (int, float)) else None)
+        esc_risk_ok = bool(
+            risk_level is not None
+            and (risk_level >= 4 or (risk_level == 3 and blast == 5)))
     esc_size_ok = bool(diff_lines >= ESCALATION_MIN_LINES
                        or len(files) >= ESCALATION_MIN_FILES)
     esc_tier_ok = tier in ("flagship", "active")
@@ -596,12 +590,28 @@ def decide(bundle, l1, jev, prior=None):
         "tier_ok": esc_tier_ok, "prior_ok": esc_prior_ok,
         "risk_level": risk_level, "diff_lines": diff_lines,
         "files_changed": len(files),
-        "budget": ("untracked in record-only mode (limits when live: "
-                   "<=2 per repo per day, ~6 fleet-wide)"),
+        "budget": ("record-only: nothing is posted, no budget is "
+                   "consumed; live mode must enforce <=2 per repo "
+                   "per day, ~6 fleet-wide (l3_budget_ok)"),
         "comment": None,
     }
     # The caller builds escalation["comment"] when the gate fires.
     d["escalation"] = escalation
+
+    # --- Ship tier + review level (v2.3.0, RECORD-ONLY: printed
+    # in the sticky and stored in the marker/record; drives no
+    # merge behaviour, Jev still never gates a merge). The tier
+    # geometry itself lives in jev_ship.ship_tier_and_level.
+    brk = d["breakage_risk"]
+    deep_risk = bool(brk is not None and brk == 2
+                     and blast is not None and blast >= 4)
+    ship_tier, level = ship_tier_and_level(
+        brk, d["p_changes_behavior"], band, bool(l1["critical"]),
+        d["owner_labels"], bool(sec_type_warranted), codex_post,
+        escalation["would_fire"], deep_risk=deep_risk)
+    d["ship_tier"] = ship_tier
+    d["review_level"] = level
+    d["review_level_name"] = REVIEW_LEVEL_NAMES[level]
 
     desired = [d["priority"]] + [f"type:{t}" for t in types] + themes + d["owner_labels"]
     if d["effort"]:

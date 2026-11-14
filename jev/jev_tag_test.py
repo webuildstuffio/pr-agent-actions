@@ -677,14 +677,14 @@ def v2_tests():
     body = marker_body(state, d, ["P2", "type:feature"], [], False)
     visible = body.split("-->", 1)[1]
     check("restyle verdict dot + bold PR labels",
-          "🟢 **Jev tagging (pilot)**" in body
-          and "**PR labels:**" in body and "`type:feature`" in body)
+          "🟢 **Jev: Ship after standard review" in body
+          and "**Labels:**" in body and "`type:feature`" in body)
     check("restyle missing-issue flag visible",
           "No linked issue found" in body)
     check("restyle hides the raw marker JSON",
           '"pr_applied"' not in visible and "{" not in visible)
     check("restyle footer carries the version",
-          f"<sub>jev-tag v{VERSION}</sub>" in body)
+          f"<sub>jev-tag v{VERSION} · one Jev pass" in body)
     body = marker_body(state, d, [], ["P2"], False, issue_number=55)
     check("restyle issue labels line, no flag",
           "**Issue #55 labels:**" in body
@@ -694,7 +694,7 @@ def v2_tests():
     body = marker_body(state, d_sec, ["P1"], [], True)
     check("restyle high band red dot + codex requested",
           body.startswith("<!--") and "🔴" in body.split("-->", 1)[1]
-          and "Codex review **requested**" in body)
+          and "Codex security review: standalone comment" in body)
     body = marker_body(state, d, [], [], False,
                        skipped=["`area:ghost` is not a label in "
                                 "this repo"])
@@ -832,7 +832,7 @@ def v21_tests():
         print(("PASS " if cond else "FAIL ") + name)
         ok = ok and bool(cond)
 
-    check("version is 2.2.0", VERSION == "2.2.0")
+    check("version is 2.3.0", VERSION == "2.3.0")
     auth_hit = {"kind": "path", "match": "src/auth/login.ts",
                 "category": "auth", "critical": False}
     d_full = {"labels_desired": ["P1", "type:security"],

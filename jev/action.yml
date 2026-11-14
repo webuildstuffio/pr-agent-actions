@@ -1,11 +1,14 @@
-# jev-action v1.1.0 (2026-11-07)
+# jev-action v1.2.0 (2026-11-14)
 #
 # Composite-action packaging of the Jev PR tagging step (jev-tag
-# v2.2.0 logic in jev_tag.py / jev_lib.py). v1.1.0 carries the
+# v2.3.0 logic in jev_tag.py / jev_lib.py). v1.2.0 carries the
+# v2.3.0 decision-logic bump (wave dedupe for escalation posting,
+# Risk to ship tier + review levels L0-L4 record-only, test-gap
+# signal, sticky verdict redesign); the packaging itself is
+# unchanged from v1.0.0. v1.1.0 carried the
 # v2.2.0 decision-logic bump (retry + abstain, docs-only gate,
 # Layer 1 refinement, standalone Codex comment, dedicated security
-# call with escalation concurrence); the packaging itself is
-# unchanged from v1.0.0. Replaces the
+# call with escalation concurrence). Replaces the
 # v2.x raw.githubusercontent curl + SHA256 digest load: when
 # pr-agent-settings went private, that unauthenticated fetch began
 # returning 404 and the step's fail-open design absorbed it
@@ -20,6 +23,9 @@
 # jev-tag v2.1.0. v1.1.0: packaging unchanged, decision logic is
 # jev-tag v2.2.0 (marker state gains one additive field,
 # codex_standalone_posted; the v1 marker format is unchanged).
+# v1.2.0: packaging unchanged, decision logic is jev-tag v2.3.0
+# (marker state gains additive ship_tier / review_level /
+# wave_sibling fields; the v1 marker format is unchanged).
 name: Jev PR tagging
 description: >-
   Layer 1 path rules plus one Jev Decisions API request label the
