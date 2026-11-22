@@ -203,12 +203,27 @@ def self_test():
         "priority": {"type": "choice", "choice": "P2",
                      "probabilities": {"P2": 0.7}}}}
     d9 = decide(bundle, plain, mid_none)
-    check("3109 mid band category none no security type",
+    # v2.4.0: this fixture's blast is 4, so the mid-P + blast>=4
+    # post route fires with concurrence: the PR posts Codex, and
+    # a fired post now warrants the type (the torontocrimescore
+    # divergence fix). Pre-2.4.0 this asserted the old split.
+    check("3109 shape with blast 4: post fires, stamp follows",
           d9["security_band"] == "mid"
-          and d9["security_type_warranted"] is False
-          and "security" not in d9["types"]
-          and d9["priority"] == "P2")
-    pick_sec = {"answers": dict(mid_none["answers"], change_type={
+          and d9["codex_post"] is True
+          and d9["security_type_warranted"] is True
+          and "security" in d9["types"]
+          and d9["priority"] == "P1")  # flagship security floor
+    mid_none_calm = {"answers": dict(
+        mid_none["answers"],
+        blast_radius={"type": "score", "score": 1.0})}
+    d9b = decide(bundle, plain, mid_none_calm)
+    check("3109 mid band category none, no post route: no type",
+          d9b["security_band"] == "mid"
+          and d9b["codex_post"] is False
+          and d9b["security_type_warranted"] is False
+          and "security" not in d9b["types"]
+          and d9b["priority"] == "P2")
+    pick_sec = {"answers": dict(mid_none_calm["answers"], change_type={
         "type": "choice", "choice": "security",
         "probabilities": {"security": 0.7, "refactor": 0.2}})}
     d11 = decide(bundle, plain, pick_sec)
@@ -222,7 +237,7 @@ def self_test():
     check("mid band with category agreement gets security type",
           d10["security_type_warranted"] is True
           and "security" in d10["types"])
-    oos = {"answers": dict(mid_none["answers"], security_category={
+    oos = {"answers": dict(mid_none_calm["answers"], security_category={
         "type": "choice", "choice": "crypto",
         "probabilities": {"crypto": 0.7}})}
     d12 = decide(bundle, plain, oos)
@@ -832,7 +847,7 @@ def v21_tests():
         print(("PASS " if cond else "FAIL ") + name)
         ok = ok and bool(cond)
 
-    check("version is 2.3.0", VERSION == "2.3.0")
+    check("version is 2.4.0", VERSION == "2.4.0")
     auth_hit = {"kind": "path", "match": "src/auth/login.ts",
                 "category": "auth", "critical": False}
     d_full = {"labels_desired": ["P1", "type:security"],

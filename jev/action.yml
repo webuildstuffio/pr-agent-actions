@@ -1,7 +1,12 @@
-# jev-action v1.2.0 (2026-11-14)
+# jev-action v1.3.0 (2026-11-21)
 #
 # Composite-action packaging of the Jev PR tagging step (jev-tag
-# v2.3.0 logic in jev_tag.py / jev_lib.py). v1.2.0 carries the
+# v2.4.0 logic in jev_tag.py / jev_lib.py). v1.3.0 carries the
+# v2.4.0 decision-logic bump (test-gap aim: behavior gate, Rust
+# *_tests paths, config/data file kinds; a fired Codex post now
+# warrants the security type; Deep + L1 verdict-line coherence;
+# effort distribution persisted in the marker); the packaging
+# itself is unchanged from v1.0.0. v1.2.0 carried the
 # v2.3.0 decision-logic bump (wave dedupe for escalation posting,
 # Risk to ship tier + review levels L0-L4 record-only, test-gap
 # signal, sticky verdict redesign); the packaging itself is
@@ -26,6 +31,9 @@
 # v1.2.0: packaging unchanged, decision logic is jev-tag v2.3.0
 # (marker state gains additive ship_tier / review_level /
 # wave_sibling fields; the v1 marker format is unchanged).
+# v1.3.0: packaging unchanged, decision logic is jev-tag v2.4.0
+# (marker state gains additive effort_p / effort_margin fields;
+# the v1 marker format is unchanged).
 name: Jev PR tagging
 description: >-
   Layer 1 path rules plus one Jev Decisions API request label the

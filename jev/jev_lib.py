@@ -7,7 +7,7 @@ pinned SHA. Python 3 standard library only."""
 
 # Re-exports (v2.2.0 module split): jev_tag.py and the tests
 # import these names from jev_lib, as they did before the split.
-from jev_layer1 import (DEP_MANIFESTS, SCHEMA_EFFORTS,
+from jev_layer1 import (SCHEMA_EFFORTS,
                         SCHEMA_PRIORITIES, SCHEMA_THEMES,
                         SCHEMA_TYPES, SEC_CATEGORIES, docs_only,
                         repo_specialties, test_gap)
@@ -34,6 +34,12 @@ from jev_ship import pick_wave_leader as pick_wave_leader
 from jev_ship import ship_tier_and_level as ship_tier_and_level
 from jev_ship import wave_dedupe_applies as wave_dedupe_applies
 from jev_ship import wave_key as wave_key
+from jev_state import SNIPPET_PER_FILE as SNIPPET_PER_FILE
+from jev_state import SNIPPET_TOTAL_BUDGET as SNIPPET_TOTAL_BUDGET
+from jev_state import STATE_BUDGET as STATE_BUDGET
+from jev_state import build_security_state as build_security_state
+from jev_state import build_state as build_state
+from jev_state import trunc_bytes as trunc_bytes
 
 OWNER_LABEL_MIN = 0.90        # noul needed for owner-decision / -mustdo
 THEME_MIN = 0.30              # min choice probability per applied theme
@@ -41,7 +47,6 @@ TYPE_SECOND_MIN = 0.30        # min probability for a secondary type:*
 EFFORT_MIN = 0.60             # min probability to apply an effort label
 SEC_HIGH = 0.80               # P(security) high band
 SEC_MID = 0.40                # P(security) mid band
-STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 
 # Step version (NOT the marker state schema, which stays jev-tag:v1).
 # v2.0.0 = the combined 2026-10-28 release: the label-guard/specialty/
@@ -86,7 +91,31 @@ STATE_BUDGET = 27000          # bytes; Jev long-context mode starts ~32k
 # proxy to breakage_risk; (4) test-gap Layer 1 rule plus the
 # tests_cover_change noul (sticky line only); (5) sticky
 # redesign: verdict line first, Codex DELIVERY state printed.
-VERSION = "2.3.0"
+# v2.4.0 = the recheck-v5 package (2026-11-21): (1) test-gap aim:
+# the flag is suppressed when Jev's own changes_behavior answer
+# says no runtime behavior change (12 of v5's 21 false firings),
+# Rust *_tests paths classify as tests, *.config.* basenames and
+# data/ files classify as config/data instead of behavior; (2) a
+# fired Codex post now also warrants the security type (the
+# escalate-without-stamp divergence: torontocrimescore.com
+# #437/#439/#449; replay delta 3 warranted stamps gained, 1
+# stamp on an already-false post); (3) the two P4 post-route
+# widenings were replay-REJECTED and are NOT here: lowering the
+# Layer 1 route concurrence to 0.30 would add 13 false posts
+# against 2 catches, and a P>=0.70 + blast>=3 route nets 1 catch
+# against 1 known + up to 4 unknown-blast false posts (538
+# judged rows, deep-dive + v3 + v5 corpora); (4) ship tier
+# geometry is unchanged: replay showed every deterministic
+# tightening flips more correct Deep tiers than wrong ones
+# (best variant 6 fixes / 15 regressions on v5), the over-calls
+# are breakage-answer noise, not geometry; the sticky verdict
+# line now reads coherently for Deep + L1; (5) effort winner
+# probability + margin are persisted in the marker so the P5
+# abstention refit has data next time (the bar is unchanged);
+# (6) miniscreen's zero-processing root cause was repo-side (its
+# qodo-review workflow was manually disabled) and is fixed by
+# re-enabling it, not by code here.
+VERSION = "2.4.0"
 
 # Fleet label schema v4.2 generic set (53). Anything in a repo's live
 # label list NOT in this set counts as a repo specialty label.
@@ -115,127 +144,12 @@ ESCALATION_COMMENT = (
 ESCALATION_MIN_LINES = 400    # gate: large diff by changed lines...
 ESCALATION_MIN_FILES = 15     # ...or by file count
 
-
-def trunc_bytes(text, limit):
-    """Truncate a string to at most `limit` UTF-8 bytes, safely."""
-    if text is None:
-        return ""
-    raw = text.encode("utf-8", "ignore")
-    if len(raw) <= limit:
-        return text
-    return raw[:limit].decode("utf-8", "ignore") + "\n[truncated]"
-
-
-
-
-
 PERF_FLAG_MIN = 0.70          # P(perf risk) at/above this flags the PR
 ISSUE_READY_LOW_MAX = 0.40    # P(issue ready) below this flags the issue
 USER_IMPACT_MIN = 0.50        # min choice probability to act on impact
 # The user-facing matcher and the comment-text builders live in
 # jev_tag.py (presentation); decide() consumes the caller's
 # precomputed bundle["user_facing_label"] instead.
-
-
-def build_state(bundle, l1):
-    """Assemble the Jev `state` text, capped under the long-context
-    threshold (~32k bytes). Bodies are trimmed first."""
-    issue = bundle["issue"] or {}
-    parts = []
-    parts.append(f"Repository: {bundle['repo']} (fleet tier: {bundle['tier']})")
-    parts.append(f"Pull request #{bundle['pr_number']} by {bundle['pr_author']}: {bundle['pr_title']}")
-    parts.append("PR description:\n" + trunc_bytes(bundle["pr_body"] or "(empty)", 6000))
-    if issue:
-        parts.append(f"Linked issue #{issue['number']}: {issue['title']}")
-        parts.append("Issue description:\n" + trunc_bytes(issue["body"] or "(empty)", 6000))
-    lines = [f"{f['path']} (+{f['additions']} -{f['deletions']})"
-             for f in bundle["files"]]
-    files_text = "\n".join(lines) if lines else "(none)"
-    if bundle.get("files_truncated"):
-        files_text += "\n(note: file list hit the API cap; may be incomplete)"
-    parts.append("Changed files:\n" + trunc_bytes(files_text, 6000))
-    evidence = l1.get("evidence") or {}
-    if evidence:
-        lines = [f"- {cat}: {', '.join(paths)}"
-                 for cat, paths in sorted(evidence.items())]
-        parts.append(
-            "Deterministic evidence (facts only: these changed-file "
-            "paths matched deterministic path categories (security, "
-            "data, infra, dependencies); they are not conclusions, "
-            "whether the change is actually security-related is "
-            "for the questions to judge):\n"
-            + "\n".join(lines))
-    else:
-        parts.append(
-            "Deterministic evidence: no changed file matched a "
-            "security-relevant path category.")
-    if bundle["readme"]:
-        parts.append("Repository README excerpt:\n" + trunc_bytes(bundle["readme"], 2500))
-    if bundle["agents"]:
-        parts.append("Repository AGENTS.md excerpt:\n" + trunc_bytes(bundle["agents"], 2500))
-    catalog = repo_specialties(bundle.get("repo_labels"))
-    if catalog:
-        # The FULL specialty list from the repo's live labels (the
-        # only specialty labels Jev may pick). Descriptions are
-        # dropped first if the section would crowd out the budget.
-        head = ("Repository specialty labels (repo-specific; the only "
-                "non-generic labels that exist in this repo):\n")
-        section = head + "\n".join(
-            f"- {n}: {d}" if d else f"- {n}"
-            for n, d in sorted(catalog.items()))
-        if len(section.encode("utf-8")) > 5000:
-            section = head + "\n".join(sorted(catalog))
-        parts.append(trunc_bytes(section, 5000))
-    return trunc_bytes("\n\n".join(parts), STATE_BUDGET)
-
-
-
-
-SNIPPET_TOTAL_BUDGET = 8000   # bytes of patch text, security call
-SNIPPET_PER_FILE = 2000       # bytes per file
-
-
-def _security_relevant(path, l1):
-    """A file whose patch belongs in the security call's state:
-    a workflow file, a dependency manifest, or any file with a
-    Layer 1 category hit."""
-    comps = [c for c in path.lower().split("/") if c]
-    if comps[:2] == [".github", "workflows"]:
-        return True
-    if comps and comps[-1] in DEP_MANIFESTS:
-        return True
-    evidence = (l1 or {}).get("evidence") or {}
-    return any(path in paths for paths in evidence.values())
-
-
-def build_security_state(bundle, l1):
-    """State for the dedicated security call: the main state
-    trimmed so the total stays under STATE_BUDGET, plus a patch
-    snippet section (security-relevant files only, deletions
-    included, capped per file and in total)."""
-    base = build_state(bundle, l1)
-    room = STATE_BUDGET - SNIPPET_TOTAL_BUDGET - 200
-    base = trunc_bytes(base, room)
-    snippets = []
-    used = 0
-    for f in bundle.get("files") or []:
-        patch = f.get("patch")
-        if not patch or not _security_relevant(f["path"], l1):
-            continue
-        if used >= SNIPPET_TOTAL_BUDGET:
-            break
-        cap = min(SNIPPET_PER_FILE, SNIPPET_TOTAL_BUDGET - used)
-        text = trunc_bytes(patch, cap)
-        snippets.append(f"--- {f['path']}\n{text}")
-        used += len(text.encode("utf-8"))
-    if not snippets:
-        return base
-    return base + ("\n\nPatch snippets for security-relevant files "
-                   "(unified diff excerpts; judge what the change "
-                   "actually does, not just the path):\n"
-                   + "\n".join(snippets))
-
-
 
 
 # -------------------------------------------------------------- Decide
@@ -355,24 +269,6 @@ def decide(bundle, l1, jev, prior=None):
     d["security_band"] = band
     cat, _ = top_choice(answers.get("security_category"))
     d["security_category"] = cat if cat in SEC_CATEGORIES else None
-    # The security TYPE needs its own warrant, stricter than the
-    # band. It comes from exactly two sources: (a) a Layer 1
-    # SECURITY hard PATH hit (or the human-label floor), or (b)
-    # Jev's own verdict with category agreement: a
-    # mid-band-or-higher probability whose own security_category
-    # answer is a real category, not "none". A bare mid-band
-    # probability with category "none" (folio-app #3109) applied
-    # type:security to a non-security PR in apply mode, and the
-    # type then cascaded into the flagship priority floor. Jev's
-    # secrets_in_text at high is a direct detection of pasted
-    # secret material and also warrants.
-    cat_agrees = cat in SEC_CATEGORIES and cat != "none"
-    sec_type_warranted = (
-        l1_sec or human_sec
-        or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
-        or (not docs_gate and p_sec is not None and p_sec >= SEC_MID
-            and cat_agrees))
-    d["security_type_warranted"] = bool(sec_type_warranted)
     # The Codex post (v2.2.0): the pre-2.2.0 rule fired on ANY
     # security-hard Layer 1 hit alone, which is where the false
     # positives concentrated (healthy trigger precision 58.0%).
@@ -381,11 +277,9 @@ def decide(bundle, l1, jev, prior=None):
     # post route (Layer 1 security hit, high P, or mid P with
     # blast >= 4). A critical-filename hit (.env, key material)
     # posts without concurrence: deterministic, model-independent.
-    # The security LABEL above deliberately keeps its old rule:
-    # concurrence on the label was simulated net-negative (it
-    # breaks 20 warranted low-P stamps to fix 9). The human-label
-    # floor raises the band for labels, but does not post on its
-    # own, and must never suppress an escalation Jev earned.
+    # The human-label floor raises the band for labels, but does
+    # not post on its own, and must never suppress an escalation
+    # Jev earned.
     concurrence = p_sec is not None and p_sec >= SEC_MID
     d["codex_concurrence"] = bool(concurrence)
     post_route = (
@@ -399,6 +293,37 @@ def decide(bundle, l1, jev, prior=None):
     codex_post = bool((post_route and concurrence)
                       or l1["critical"])
     d["codex_post"] = codex_post
+    # The security TYPE needs its own warrant, stricter than the
+    # band. It comes from exactly two sources: (a) a Layer 1
+    # SECURITY hard PATH hit (or the human-label floor), or (b)
+    # Jev's own verdict with category agreement: a
+    # mid-band-or-higher probability whose own security_category
+    # answer is a real category, not "none". A bare mid-band
+    # probability with category "none" (folio-app #3109) applied
+    # type:security to a non-security PR in apply mode, and the
+    # type then cascaded into the flagship priority floor. Jev's
+    # secrets_in_text at high is a direct detection of pasted
+    # secret material and also warrants.
+    # v2.4.0 adds source (c): a fired Codex post. The post rule is
+    # the stricter gate (route + concurrence, or a critical hit),
+    # so a PR that earns a security review carries the type: the
+    # pre-2.4.0 split escalated torontocrimescore.com #437/#439/
+    # #449 (SigV4 signing and XSS fixes at P 0.43-0.82, category
+    # "none") without stamping them. Replay over the combined
+    # judged corpora (538 rows): 4 escalated-but-unstamped rows,
+    # 3 warranted (the Toronto three), 1 not (an escalation judges
+    # already scored a false post). This is NOT the concurrence-
+    # on-the-label rule simulated net-negative in v2.2.0 (that one
+    # REMOVED L1-only stamps); this only adds stamps where the
+    # stricter post gate already fired.
+    cat_agrees = cat in SEC_CATEGORIES and cat != "none"
+    sec_type_warranted = (
+        l1_sec or human_sec
+        or (secrets_txt is not None and secrets_txt >= SEC_HIGH)
+        or (not docs_gate and p_sec is not None and p_sec >= SEC_MID
+            and cat_agrees)
+        or codex_post)
+    d["security_type_warranted"] = bool(sec_type_warranted)
 
     # --- types (1-3)
     types = []
@@ -449,7 +374,32 @@ def decide(bundle, l1, jev, prior=None):
     # --- effort (only when confident)
     eff, eff_p = top_choice(answers.get("effort"))
     d["effort"] = eff if (eff in SCHEMA_EFFORTS and eff_p >= EFFORT_MIN) else None
-    d["effort_p"] = eff_p
+    # v2.4.0: the winner's margin over the runner-up, recorded so
+    # the P5 abstention refit can run on future rechecks. Recheck
+    # v5 could not refit the 0.60 winner-probability bar (37.9%
+    # abstention, 95.4% conditional accuracy) because NO corpus
+    # records the effort distribution: the marker and the sticky
+    # carried only the applied label. decide() now exposes the
+    # margin and apply_decision persists both numbers in the
+    # marker (additive fields). The bar itself is unchanged:
+    # no distribution data, no threshold change.
+    eff_probs = sorted(
+        (float(p) for p in
+         ((answers.get("effort") or {}).get("probabilities")
+          or {}).values()
+         if isinstance(p, (int, float))), reverse=True)
+    # No recorded distribution (the model never answered, or the
+    # answer carried no probabilities): top_choice's 0.0 is a
+    # synthetic default, not a measurement. Record None so apply
+    # leaves the marker field absent instead of persisting a 0.0
+    # that reads as a real answer in the refit corpus (Kody, PR 64).
+    d["effort_p"] = eff_p if eff_probs else None
+    # No runner-up in the distribution = no measurable margin:
+    # record None (the marker field stays absent) rather than the
+    # winner's own probability, which would overstate confidence
+    # in the refit data (Qodo, PR 64).
+    d["effort_margin"] = (eff_probs[0] - eff_probs[1]
+                          if len(eff_probs) > 1 else None)
 
     # --- owner labels (high threshold only)
     od = (answers.get("owner_decision") or {}).get("noul")
@@ -492,10 +442,27 @@ def decide(bundle, l1, jev, prior=None):
     d["p_tests_cover_change"] = (float(tc_p)
                                  if isinstance(tc_p, (int, float))
                                  else None)
-    d["test_gap_flag"] = bool(
+    # v2.4.0 (recheck v5, the weakest v2.3.0 line: 30/51 firings
+    # correct): the flag consults Jev's own changes_behavior
+    # answer. When the model itself says the PR probably does NOT
+    # change runtime behavior (P < 0.50), there is no behavior to
+    # test and the flag is suppressed: 12 of the 21 false firings
+    # in v5 (the megamem verbatim-split series, docs/comment-only
+    # and cleanup PRs) carried exactly that answer, and none of
+    # the 30 correct firings did. The Layer 1 counts stay in the
+    # record untouched; only the flag (and so the sticky line) is
+    # gated. An unanswered changes_behavior never suppresses.
+    behavior_no = (d["p_changes_behavior"] is not None
+                   and d["p_changes_behavior"] < 0.50)
+    d["test_gap_behavior_gate"] = bool(behavior_no and bool(
         d["test_gap"]["status"] == "hard"
         or (d["p_tests_cover_change"] is not None
-            and d["p_tests_cover_change"] < 0.40))
+            and d["p_tests_cover_change"] < 0.40)))
+    d["test_gap_flag"] = bool(
+        (d["test_gap"]["status"] == "hard"
+         or (d["p_tests_cover_change"] is not None
+             and d["p_tests_cover_change"] < 0.40))
+        and not behavior_no)
 
     # --- specialty labels: picks come only from the repo's live
     # list (the dynamic question's criteria); outside picks, or any
