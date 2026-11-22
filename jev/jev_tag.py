@@ -318,6 +318,21 @@ def apply_decision(gh, bundle, d, comments=None, mention_gh=None,
     # and the human-veto sets above are untouched by them.
     state["ship_tier"] = d.get("ship_tier")
     state["review_level"] = d.get("review_level")
+    # v2.4.0 additive marker fields: the effort distribution, so
+    # a future recheck can refit the abstention bar (P5) from
+    # recorded winner probability + margin instead of the applied
+    # label alone. Additive only; old markers parse unchanged.
+    # Set-or-clear: a rerun whose current decision lacks the value
+    # must not leave the previous run's value in the marker, or the
+    # recorded (effort_p, effort_margin) pair mixes two decisions.
+    if isinstance(d.get("effort_p"), (int, float)):
+        state["effort_p"] = round(float(d["effort_p"]), 3)
+    else:
+        state.pop("effort_p", None)
+    if isinstance(d.get("effort_margin"), (int, float)):
+        state["effort_margin"] = round(float(d["effort_margin"]), 3)
+    else:
+        state.pop("effort_margin", None)
     if d.get("wave_sibling"):
         state["wave_sibling"] = d["wave_sibling"]
     state["runs"] = int(state.get("runs") or 0) + 1

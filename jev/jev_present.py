@@ -33,6 +33,16 @@ def marker_body(state, d, adds_pr, adds_issue, codex_now,
         lines.append("⚪ **Jev: no verdict · model unavailable**")
     elif d.get("ship_tier"):
         lvl = d.get("review_level_name") or ""
+        # v2.4.0 verdict-line coherence (recheck v4/v5 finding):
+        # "Deep review required · L1 (Codex general)" reads as a
+        # contradiction, because the tier can rise on breakage
+        # alone while the level only rises on a Codex post, the
+        # L3 gate, or an owner condition (24 of 62 Deep tiers in
+        # v5 sat at L1). The numeric level stays what it is; the
+        # line now says where the deep review comes from.
+        if d["ship_tier"] == "Deep review required" \
+                and d.get("review_level") == 1:
+            lvl += " + human deep review"
         lines.append(
             f"{TIER_DOTS.get(d['ship_tier'], '⚪')} **Jev: "
             f"{d['ship_tier']} · Review level {lvl}**")

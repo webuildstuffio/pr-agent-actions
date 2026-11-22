@@ -118,14 +118,30 @@ DOC_BASENAME_PREFIXES = ("readme", "changelog", "license",
                          "notice", "code_of_conduct", "security")
 
 
+def _segments(name):
+    """Whole-word segments of one path component (split on - _ .):
+    the same whole-word semantics Layer 1 uses everywhere, so
+    "contest" and "testament" never read as test words."""
+    return [s for s in re.split(r"[-_.]", name) if s]
+
+
 def is_test_path(comps):
     """True when any directory component names a test tree, or the
     filename itself follows a test naming convention."""
     if any(c in TEST_PATH_COMPONENTS for c in comps[:-1]):
         return True
+    # v2.4.0: a whole "tests" segment in any directory component
+    # or in the filename stem also names a test tree. Rust inline
+    # test modules are the production case (megamem recheck v5:
+    # bm25_tests.rs, turboquant_tests.rs, fetch_tests/,
+    # registry_tests_query.rs all classified as behavior files,
+    # so test-only split PRs earned false hard test gaps).
+    if any("tests" in _segments(c) for c in comps[:-1]):
+        return True
     base = comps[-1] if comps else ""
     stem = base.rsplit(".", 1)[0] if "." in base else base
     return (stem.startswith("test_") or stem.endswith("_test")
+            or "tests" in _segments(stem)
             or ".test" in base or ".spec" in base)
 
 
@@ -174,7 +190,10 @@ def file_kind(path):
     """One coarse kind per changed file, for the test-gap rule.
     The allowlist classes (generated, lockfile, migration, config,
     docs, tests) never count as behavior files, so a PR touching
-    only those can never earn a hard test gap."""
+    only those can never earn a hard test gap. v2.4.0 adds two
+    more non-behavior classes from the recheck-v5 false firings:
+    `*.config.*` basenames (config) and files under a `data/`
+    directory (data)."""
     comps = [c for c in path.lower().split("/") if c]
     if not comps:
         return "other"
@@ -195,6 +214,20 @@ def file_kind(path):
     if ext in CONFIG_EXTS or base in INFRA_BASENAMES \
             or base == ".env" or base.startswith(".env."):
         return "config"
+    # v2.4.0 (recheck v5): a `*.config.*` basename (next.config.js,
+    # vite.config.ts, ...) is a configuration file, not behavior:
+    # powerloss.tech #992 earned a hard gap from next.config.js
+    # alone on a config-only change. Only the stem's LAST segment
+    # counts, so src/config/types.rs stays behavior.
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    if _segments(stem)[-1:] == ["config"]:
+        return "config"
+    # v2.4.0 (recheck v5): a file under a `data/` directory is
+    # content data (upgrade.tools #859: an SEO data module with no
+    # code logic earned a hard gap). A repo whose data directory
+    # carries real logic still fires via its other behavior files.
+    if "data" in comps[:-1]:
+        return "data"
     if ext in CODE_EXTS:
         return "behavior"
     return "other"
